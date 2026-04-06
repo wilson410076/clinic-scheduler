@@ -15,7 +15,7 @@ DOCTOR_ASSISTANT_MATCH = {
 }
 
 # 助理名單與限制
-ASSISTANTS = ["映璇", "和芸", "欣寧", "萃屏", "維珍", "紫茵", "菀庭", "姿穎", "濘安"]
+ASSISTANTS = ["映璇", "和芸", "欣寧", "萃屏", "維珍", "菀庭", "姿穎", "濘安"]
 ONLY_MORNING_AFTERNOON = ["維珍"]
 ONLY_COUNTER = ["欣寧"]
 EXCLUDED_STAFF = ["怡婷", "詩庭"]
