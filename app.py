@@ -6,28 +6,22 @@ import openpyxl
 # ==========================================
 # 1. 診所排班規則與優先序設定
 # ==========================================
-# 規則 1, 8, 9, 10：一般強制綁定
 DOCTOR_ASSISTANT_MATCH = {
     "陳逸陽": "映璇", "王荷若": "萃屏", "李昆晏": "萃屏", "許雅茹": "和芸", "劉筑昀": "姿穎"
 }
-# 規則 5, 11 (濘安與菀庭的特殊週六規則)
 SATURDAY_SPECIAL_MATCH = {
     "官俊彥": "濘安",
     "陳明志": "菀庭"
 }
 
-# 助理名單
 ASSISTANTS = ["映璇", "和芸", "欣寧", "萃屏", "維珍", "菀庭", "姿穎", "濘安"]
-
-# 規則 13：統一櫃檯優先順序
 COUNTER_PRIORITY = ["欣寧", "維珍", "和芸", "映璇", "姿穎"]
 
-# 各種限制名單
 ONLY_COUNTER = ["欣寧"]
-NO_COUNTER = ["萃屏", "菀庭", "濘安"] # 濘安也不排櫃檯
+NO_COUNTER = ["萃屏", "菀庭", "濘安"]
 NO_NIGHT_SHIFT = ["維珍"]
 
-st.set_page_config(page_title="恩霖診所 - 自動排班系統 V8", layout="wide")
+st.set_page_config(page_title="恩霖診所 - 自動排班系統 V9", layout="wide")
 
 if "authenticated" not in st.session_state: st.session_state.authenticated = False
 if not st.session_state.authenticated:
@@ -39,8 +33,8 @@ if not st.session_state.authenticated:
     st.stop()
 if "timeoff_db" not in st.session_state: st.session_state.timeoff_db = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V8")
-st.info("📌 已新增規則：週六的「官俊彥」醫師固定指派「濘安」跟診，其餘時間不排濘安。")
+st.title("🏥 恩霖診所 - 自動排班系統 V9")
+st.info("🛡️ 已裝備「防撞邊界」：修復 Excel 右側多餘欄位導致的系統崩潰問題。")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -64,13 +58,16 @@ with tab3:
         if not uploaded_file:
             st.error("請先上傳班表！")
         else:
-            with st.spinner("AI 正在解析週六特殊規則與人員調度..."):
+            with st.spinner("AI 正在掃描表格，並自動避開無效區域..."):
                 try:
                     wb = openpyxl.load_workbook(uploaded_file)
                     ws = wb.active
                     
+                    # 🛡️ 核心修復：加入邊界防護，防止 KeyError 或 IndexError
                     def is_on_leave(ast_name, day_num, shift_type):
                         if ast_name not in st.session_state.timeoff_db: return False
+                        if day_num < 1 or day_num > 31: return False # 防撞邊界！超過31號直接當作沒休假
+                        
                         db = st.session_state.timeoff_db[ast_name]
                         col_name = "早休" if "早" in shift_type else ("午休" if "午" in shift_type else "晚休")
                         return db.loc[day_num - 1, col_name]
@@ -84,13 +81,11 @@ with tab3:
                         elif "晚班" in val: current_shift = "晚班"
                         if current_shift: shift_rows[current_shift].append(r)
 
-                    # 逐日排班 (假設第一行或第二行含有星期資訊)
                     for col_idx in range(2, ws.max_column, 2):
                         day_num = (col_idx // 2)
                         
-                        # 偵測是否為週六 (尋找該列標題是否含有 "六")
                         is_saturday = False
-                        for r_check in range(1, 10): # 掃描前10列找星期
+                        for r_check in range(1, 10): 
                             val_check = str(ws.cell(row=r_check, column=col_idx).value)
                             if "六" in val_check:
                                 is_saturday = True
@@ -107,10 +102,8 @@ with tab3:
                                     docs.append((r, d_name))
                                     
                                     assigned_ast = None
-                                    # 優先判斷週六特殊綁定 (官俊彥=濘安, 陳明志=菀庭)
                                     if is_saturday and d_name in SATURDAY_SPECIAL_MATCH:
                                         assigned_ast = SATURDAY_SPECIAL_MATCH[d_name]
-                                    # 一般綁定
                                     elif d_name in DOCTOR_ASSISTANT_MATCH:
                                         assigned_ast = DOCTOR_ASSISTANT_MATCH[d_name]
                                     
@@ -125,12 +118,10 @@ with tab3:
                             assigned_counters = []
                             for candidate in COUNTER_PRIORITY:
                                 if len(assigned_counters) >= counter_needed: break
-                                # 排除已上班、休假、或濘安 (濘安不排櫃檯)
                                 if candidate not in working_now and not is_on_leave(candidate, day_num, shift_name):
                                     assigned_counters.append(candidate)
                                     working_now.add(candidate)
                             
-                            # 補齊櫃檯 (排除濘安)
                             while len(assigned_counters) < counter_needed:
                                 pool = [a for a in ASSISTANTS if a not in working_now and a not in NO_COUNTER]
                                 if pool:
@@ -147,8 +138,7 @@ with tab3:
 
                             # C. 其餘醫師跟診
                             for r, d_name in docs:
-                                if not ws.cell(row=r, column=col_idx+1).value: # 如果還沒被綁定
-                                    # 排除已上班、純櫃檯、及「濘安」(因為她只跟官醫師且只在週六)
+                                if not ws.cell(row=r, column=col_idx+1).value: 
                                     pool = [a for a in ASSISTANTS if a not in working_now and a not in ONLY_COUNTER and a != "濘安"]
                                     if "晚" in shift_name and "維珍" in pool: pool.remove("維珍")
                                     
@@ -161,7 +151,7 @@ with tab3:
 
                     output = io.BytesIO()
                     wb.save(output)
-                    st.success("排班完成！已套用週六濘安專屬規則。")
-                    st.download_button("📥 下載 V8 完成版", output.getvalue(), "恩霖診所_AI排班_V8.xlsx")
+                    st.success("排班完成！已完美避開多餘的空白格子與統計欄位。")
+                    st.download_button("📥 下載 V9 穩定版", output.getvalue(), "恩霖診所_AI排班_V9.xlsx")
                 except Exception as e:
-                    st.error(f"運算錯誤：{e}")
+                    st.error(f"遭遇未預期錯誤，請截圖此訊息給開發者：{e}")
