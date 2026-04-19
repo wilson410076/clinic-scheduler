@@ -2,7 +2,11 @@ import streamlit as st
 import pandas as pd
 import io
 import openpyxl
+from openpyxl.styles import Font
 import datetime
+
+# 統一字型設定（與原班表一致）
+CELL_FONT = Font(name="微軟正黑體", size=10)
 
 # ==========================================
 # 1. 診所排班規則與設定
@@ -75,27 +79,109 @@ with tab1:
 # ==========================================
 # Tab 2: 助理劃休
 # ==========================================
+
+# 星期六對應的日期（從上傳班表讀取；若未上傳則預設空集合）
+# 直接用固定規則：5月2,9,16,23,30 為六
+SATURDAY_DATES = {2, 9, 16, 23, 30}
+
 with tab2:
     selected_ast = st.selectbox("選擇助理：", ASSISTANTS)
+
+    # 初始化資料（若該助理尚無記錄）
     if selected_ast not in st.session_state.timeoff_db:
         df = pd.DataFrame({
-            "日期": [f"{i}號" for i in range(1, 32)],
-            "早休": [False] * 31,
-            "午休": [False] * 31,
-            "晚休": [False] * 31,
+            "日期":   [f"{i}號{'（六）' if i in SATURDAY_DATES else ''}" for i in range(1, 32)],
+            "休整天": [False] * 31,
+            "早休":   [False] * 31,
+            "午休":   [False] * 31,
+            "晚休":   [False] * 31,
         })
         if selected_ast in NO_NIGHT_SHIFT:
             df["晚休"] = True
         st.session_state.timeoff_db[selected_ast] = df
 
+    # 已儲存的資料
+    saved_df = st.session_state.timeoff_db[selected_ast].copy()
+
+    # 欄位設定
+    column_config = {
+        "日期": st.column_config.TextColumn("日期", width="small", disabled=True),
+        "休整天": st.column_config.CheckboxColumn("✅ 休整天", width="small",
+            help="打勾後自動勾選早、午、晚休"),
+        "早休": st.column_config.CheckboxColumn("早休", width="small"),
+        "午休": st.column_config.CheckboxColumn("午休", width="small"),
+        "晚休": st.column_config.CheckboxColumn("晚休", width="small"),
+    }
+
+    # 禁用星期六晚休、NO_NIGHT_SHIFT 助理晚休
+    disabled_cols = []
+    if selected_ast in NO_NIGHT_SHIFT:
+        disabled_cols.append("晚休")
+
+    st.info("📌 星期六（2、9、16、23、30 號）無晚班，即使勾選晚休也不會計入排班。")
+
     edited_df = st.data_editor(
-        st.session_state.timeoff_db[selected_ast],
+        saved_df,
         hide_index=True,
         key=f"ed_{selected_ast}",
+        column_config=column_config,
+        disabled=disabled_cols,
+        use_container_width=True,
     )
-    if st.button(f"儲存 {selected_ast} 休假"):
-        st.session_state.timeoff_db[selected_ast] = edited_df
-        st.toast(f"{selected_ast} 的休假已更新")
+
+    # 「休整天」打勾 → 自動帶動早午晚全勾
+    for i, row in edited_df.iterrows():
+        day_num = i + 1
+        if row["休整天"]:
+            edited_df.at[i, "早休"] = True
+            edited_df.at[i, "午休"] = True
+            if day_num not in SATURDAY_DATES and selected_ast not in NO_NIGHT_SHIFT:
+                edited_df.at[i, "晚休"] = True
+        # 星期六晚休強制 False
+        if day_num in SATURDAY_DATES:
+            edited_df.at[i, "晚休"] = False
+
+    # 儲存按鈕
+    col_btn, col_status = st.columns([1, 3])
+    with col_btn:
+        save_clicked = st.button(f"💾 儲存 {selected_ast} 休假", type="primary")
+
+    if save_clicked:
+        st.session_state.timeoff_db[selected_ast] = edited_df.copy()
+        with col_status:
+            # 統計已勾選的休假
+            total_early = edited_df["早休"].sum()
+            total_noon  = edited_df["午休"].sum()
+            total_night = edited_df["晚休"].sum()
+            full_days   = edited_df["休整天"].sum()
+            st.success(
+                f"✅ {selected_ast} 休假已儲存！　"
+                f"休整天：{full_days} 天　早休：{total_early} 次　"
+                f"午休：{total_noon} 次　晚休：{total_night} 次"
+            )
+
+    # 視覺提示：顯示目前已儲存的休假摘要（與 editor 分開顯示，避免混淆）
+    st.divider()
+    st.caption("📌 目前已儲存的休假紀錄")
+    saved = st.session_state.timeoff_db[selected_ast]
+    full_day_list  = [f"{i+1}號" for i, r in saved.iterrows() if r["休整天"]]
+    early_list     = [f"{i+1}號" for i, r in saved.iterrows() if r["早休"] and not r["休整天"]]
+    noon_list      = [f"{i+1}號" for i, r in saved.iterrows() if r["午休"] and not r["休整天"]]
+    night_list     = [f"{i+1}號" for i, r in saved.iterrows() if r["晚休"] and not r["休整天"]]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("**🔴 休整天**")
+        st.write("、".join(full_day_list) if full_day_list else "（無）")
+    with c2:
+        st.markdown("**🟠 僅早休**")
+        st.write("、".join(early_list) if early_list else "（無）")
+    with c3:
+        st.markdown("**🟡 僅午休**")
+        st.write("、".join(noon_list) if noon_list else "（無）")
+    with c4:
+        st.markdown("**🟤 僅晚休**")
+        st.write("、".join(night_list) if night_list else "（無）")
 
 # ==========================================
 # Tab 3: 排班
@@ -124,6 +210,12 @@ with tab3:
                             return bool(db[col].iloc[day_num - 1])
                         except Exception:
                             return False
+
+                    def write_cell(row, col, value):
+                        """寫入儲存格並套用統一字型"""
+                        cell = ws.cell(row, col)
+                        cell.value = value
+                        cell.font = CELL_FONT
 
                     def find_doctors_in_cell(cell_value):
                         """從儲存格內容找出所有醫師名（支援「官+王」合診格式）"""
@@ -273,10 +365,10 @@ with tab3:
                                             assigned = pool[0]
 
                                     if assigned:
-                                        ws.cell(r, asst_col).value = assigned
+                                        write_cell(r, asst_col, assigned)
                                         working_now.add(assigned)
                                     else:
-                                        ws.cell(r, asst_col).value = "【缺人】"
+                                        write_cell(r, asst_col, "缺")
 
                                 # C. 櫃檯分配
                                 counter_needed = 2 if len(docs_this_shift) >= 4 else 1
@@ -301,14 +393,14 @@ with tab3:
                                         assigned_counters.append(pool[0])
                                         working_now.add(pool[0])
                                     else:
-                                        assigned_counters.append("【缺人】")
+                                        assigned_counters.append("缺")
                                         break
 
                                 # 寫入櫃檯列
                                 c_idx = 0
                                 for cr in counter_rows:
                                     if c_idx < len(assigned_counters) and cr:
-                                        ws.cell(cr, asst_col).value = assigned_counters[c_idx]
+                                        write_cell(cr, asst_col, assigned_counters[c_idx])
                                         c_idx += 1
 
                     # ── 輸出 ──────────────────────────────────────────
