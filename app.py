@@ -33,7 +33,7 @@ if not st.session_state.authenticated:
     st.title("🔒 恩霖診所 - 排班系統登入")
     pwd = st.text_input("請輸入系統密碼：", type="password")
     if st.button("登入"):
-        if pwd == "115":
+        if pwd == "801128":
             st.session_state.authenticated = True
             st.rerun()
         else:
