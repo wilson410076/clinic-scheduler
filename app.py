@@ -236,6 +236,9 @@ with tab3:
                                 return ac, dn, is_sat
                         return None, None, None
 
+                    # 輪班計數器：記錄每位助理累計被分配的次數，確保平均輪流
+                    rotation_counter = {a: 0 for a in ASSISTANTS}
+
                     # ── 找出所有週塊起始行 ────────────────────────────
                     enlin_rows = []
                     for r in range(1, ws.max_row + 1):
@@ -350,7 +353,7 @@ with tab3:
                                         if candidate not in working_now and not is_on_leave(candidate, day_num, shift_name):
                                             assigned = candidate
 
-                                    # 一般助理池（排除晚班 維珍、排除 ONLY_COUNTER）
+                                    # 輪流分配（依累計次數由少到多排序，確保平均輪班）
                                     if not assigned:
                                         pool = [
                                             a for a in ASSISTANTS
@@ -361,29 +364,34 @@ with tab3:
                                         ]
                                         if "晚" in shift_name:
                                             pool = [a for a in pool if a not in NO_NIGHT_SHIFT]
+                                        # 按累計次數排序，次數少的優先
+                                        pool.sort(key=lambda a: rotation_counter[a])
                                         if pool:
                                             assigned = pool[0]
 
                                     if assigned:
                                         write_cell(r, asst_col, assigned)
                                         working_now.add(assigned)
+                                        rotation_counter[assigned] += 1
                                     else:
                                         write_cell(r, asst_col, "缺")
 
                                 # C. 櫃檯分配
-                                counter_needed = 2 if len(docs_this_shift) >= 4 else 1
+                                # 診次 < 4：只填櫃1；診次 >= 4：填櫃2 + 櫃1
+                                need_two_counters = len(docs_this_shift) >= 4
                                 assigned_counters = []
 
                                 for candidate in COUNTER_PRIORITY:
-                                    if len(assigned_counters) >= counter_needed:
+                                    if len(assigned_counters) >= (2 if need_two_counters else 1):
                                         break
                                     if (candidate not in working_now
                                             and not is_on_leave(candidate, day_num, shift_name)):
                                         assigned_counters.append(candidate)
                                         working_now.add(candidate)
+                                        rotation_counter[candidate] += 1
 
                                 # 補足缺口
-                                while len(assigned_counters) < counter_needed:
+                                while len(assigned_counters) < (2 if need_two_counters else 1):
                                     pool = [
                                         a for a in ASSISTANTS
                                         if a not in working_now and a not in NO_COUNTER
@@ -392,16 +400,23 @@ with tab3:
                                     if pool:
                                         assigned_counters.append(pool[0])
                                         working_now.add(pool[0])
+                                        rotation_counter[pool[0]] += 1
                                     else:
                                         assigned_counters.append("缺")
                                         break
 
                                 # 寫入櫃檯列
-                                c_idx = 0
-                                for cr in counter_rows:
-                                    if c_idx < len(assigned_counters) and cr:
-                                        write_cell(cr, asst_col, assigned_counters[c_idx])
-                                        c_idx += 1
+                                # counter_rows = [櫃2列, 櫃1列]
+                                # 診次 < 4：只寫櫃1（索引1），櫃2 留空
+                                # 診次 >= 4：先寫櫃2（索引0），再寫櫃1（索引1）
+                                if need_two_counters:
+                                    for i, cr in enumerate(counter_rows):
+                                        if i < len(assigned_counters) and cr:
+                                            write_cell(cr, asst_col, assigned_counters[i])
+                                else:
+                                    # 只填櫃1（counter_rows 的最後一個）
+                                    if counter_rows and assigned_counters:
+                                        write_cell(counter_rows[-1], asst_col, assigned_counters[0])
 
                     # ── 輸出 ──────────────────────────────────────────
                     output = io.BytesIO()
