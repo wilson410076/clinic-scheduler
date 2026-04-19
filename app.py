@@ -2,10 +2,19 @@ import streamlit as st
 import pandas as pd
 import io
 import openpyxl
+import datetime
+import re
 
 # ==========================================
-# 1. 診所排班規則與優先序設定
+# 1. 診所排班規則與設定
 # ==========================================
+# 🩺 醫師專屬白名單 (精準過濾紅框診間號碼與雜訊)
+VALID_DOCTORS = [
+    "楊忠霖", "陳逸陽", "官俊彥", "李昆晏", "劉善總", "劉庭禎", "王荷若", "鄭竣文", 
+    "李亞凡", "陳明志", "黃菁菁", "傅超俊", "陳昶安", "陳苡瑜", "許雅茹", "蔣宜蓁", 
+    "劉筑昀", "胡瑋凡"
+]
+
 DOCTOR_ASSISTANT_MATCH = {
     "陳逸陽": "映璇", "王荷若": "萃屏", "李昆晏": "萃屏", "許雅茹": "和芸", "劉筑昀": "姿穎"
 }
@@ -21,7 +30,7 @@ ONLY_COUNTER = ["欣寧"]
 NO_COUNTER = ["萃屏", "菀庭", "濘安"]
 NO_NIGHT_SHIFT = ["維珍"]
 
-st.set_page_config(page_title="恩霖診所 - 自動排班系統 V9", layout="wide")
+st.set_page_config(page_title="恩霖診所 - 自動排班系統 V11", layout="wide")
 
 if "authenticated" not in st.session_state: st.session_state.authenticated = False
 if not st.session_state.authenticated:
@@ -33,8 +42,8 @@ if not st.session_state.authenticated:
     st.stop()
 if "timeoff_db" not in st.session_state: st.session_state.timeoff_db = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V9")
-st.info("🛡️ 已裝備「防撞邊界」：修復 Excel 右側多餘欄位導致的系統崩潰問題。")
+st.title("🏥 恩霖診所 - 自動排班系統 V11")
+st.info("🛡️ 已裝備「醫師白名單」完全忽略診間號碼，並升級「5/1 日期格式」精準掃描。")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -58,19 +67,21 @@ with tab3:
         if not uploaded_file:
             st.error("請先上傳班表！")
         else:
-            with st.spinner("AI 正在掃描表格，並自動避開無效區域..."):
+            with st.spinner("AI 正在精準校對日期與醫師名單..."):
                 try:
                     wb = openpyxl.load_workbook(uploaded_file)
                     ws = wb.active
                     
-                    # 🛡️ 核心修復：加入邊界防護，防止 KeyError 或 IndexError
-                    def is_on_leave(ast_name, day_num, shift_type):
+                    def is_on_leave(ast_name, d_num, shift_type):
                         if ast_name not in st.session_state.timeoff_db: return False
-                        if day_num < 1 or day_num > 31: return False # 防撞邊界！超過31號直接當作沒休假
+                        if d_num < 1 or d_num > 31: return False 
                         
                         db = st.session_state.timeoff_db[ast_name]
                         col_name = "早休" if "早" in shift_type else ("午休" if "午" in shift_type else "晚休")
-                        return db.loc[day_num - 1, col_name]
+                        try:
+                            return bool(db[col_name].iloc[d_num - 1])
+                        except Exception:
+                            return False
 
                     shift_rows = {"早班": [], "午班": [], "晚班": []}
                     current_shift = None
@@ -82,34 +93,56 @@ with tab3:
                         if current_shift: shift_rows[current_shift].append(r)
 
                     for col_idx in range(2, ws.max_column, 2):
-                        day_num = (col_idx // 2)
-                        
+                        day_num = -1
                         is_saturday = False
-                        for r_check in range(1, 10): 
-                            val_check = str(ws.cell(row=r_check, column=col_idx).value)
-                            if "六" in val_check:
+                        
+                        # 📅 真實日期與星期掃描器：同時看 col_idx 與右邊一格，確保不漏掉 5/1 與 (五)
+                        for r_check in range(1, 15): 
+                            val1 = ws.cell(row=r_check, column=col_idx).value
+                            val2 = ws.cell(row=r_check, column=col_idx+1).value
+                            str1 = str(val1).replace(" ", "") if val1 else ""
+                            str2 = str(val2).replace(" ", "") if val2 else ""
+                            
+                            if "六" in str1 or "六" in str2:
                                 is_saturday = True
-                                break
+                            
+                            for v in [val1, val2]:
+                                if isinstance(v, datetime.datetime):
+                                    day_num = v.day
+                                elif isinstance(v, str):
+                                    # 支援 5/1(五), 05/25, 2026-05-25 等各種格式
+                                    m1 = re.search(r'\d{2,4}[-/]\d{1,2}[-/](\d{1,2})', v)
+                                    m2 = re.search(r'\d{1,2}[-/](\d{1,2})', v)
+                                    if m1: day_num = int(m1.group(1))
+                                    elif m2: day_num = int(m2.group(1))
+
+                        if day_num == -1:
+                            day_num = col_idx // 2
 
                         for shift_name, rows in shift_rows.items():
                             working_now = set()
-                            
-                            # A. 處理跟診與強制綁定
                             docs = []
+                            
+                            # A. 處理跟診與綁定
                             for r in rows:
                                 d_name = ws.cell(row=r, column=col_idx).value
-                                if type(d_name) == str and len(d_name) >= 2:
-                                    docs.append((r, d_name))
+                                if d_name:
+                                    clean_name = str(d_name).replace(" ", "")
+                                    # 🛡️ 嚴格判斷：只處理「醫師白名單」內的人，直接無視診間號碼
+                                    doc_found = next((doc for doc in VALID_DOCTORS if doc in clean_name), None)
                                     
-                                    assigned_ast = None
-                                    if is_saturday and d_name in SATURDAY_SPECIAL_MATCH:
-                                        assigned_ast = SATURDAY_SPECIAL_MATCH[d_name]
-                                    elif d_name in DOCTOR_ASSISTANT_MATCH:
-                                        assigned_ast = DOCTOR_ASSISTANT_MATCH[d_name]
-                                    
-                                    if assigned_ast:
-                                        ws.cell(row=r, column=col_idx+1).value = assigned_ast
-                                        working_now.add(assigned_ast)
+                                    if doc_found and "休" not in clean_name:
+                                        docs.append((r, doc_found))
+                                        assigned_ast = None
+                                        
+                                        if is_saturday and doc_found in SATURDAY_SPECIAL_MATCH:
+                                            assigned_ast = SATURDAY_SPECIAL_MATCH[doc_found]
+                                        elif doc_found in DOCTOR_ASSISTANT_MATCH:
+                                            assigned_ast = DOCTOR_ASSISTANT_MATCH[doc_found]
+                                        
+                                        if assigned_ast:
+                                            ws.cell(row=r, column=col_idx+1).value = assigned_ast
+                                            working_now.add(assigned_ast)
                             
                             if not docs: continue
 
@@ -137,7 +170,7 @@ with tab3:
                                     c_idx += 1
 
                             # C. 其餘醫師跟診
-                            for r, d_name in docs:
+                            for r, doc_found in docs:
                                 if not ws.cell(row=r, column=col_idx+1).value: 
                                     pool = [a for a in ASSISTANTS if a not in working_now and a not in ONLY_COUNTER and a != "濘安"]
                                     if "晚" in shift_name and "維珍" in pool: pool.remove("維珍")
@@ -151,7 +184,7 @@ with tab3:
 
                     output = io.BytesIO()
                     wb.save(output)
-                    st.success("排班完成！已完美避開多餘的空白格子與統計欄位。")
-                    st.download_button("📥 下載 V9 穩定版", output.getvalue(), "恩霖診所_AI排班_V9.xlsx")
+                    st.success("排班完成！已完美掃描正式班表格式。")
+                    st.download_button("📥 下載 V11 終極穩定版", output.getvalue(), "恩霖診所_正式排班_V11.xlsx")
                 except Exception as e:
-                    st.error(f"遭遇未預期錯誤，請截圖此訊息給開發者：{e}")
+                    st.error(f"錯誤：{e}")
