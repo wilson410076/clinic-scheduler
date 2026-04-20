@@ -309,9 +309,14 @@ with tab3:
                             counter_rows = [row_labels.get("晚櫃2"), row_labels.get("晚櫃1")]
                             shifts.append(("晚班", doc_rows, [r for r in counter_rows if r]))
 
-                        # 3. 對每個班別 × 每一天 做排班
-                        for shift_name, doc_rows, counter_rows in shifts:
-                            for doc_col, asst_col, day_num, is_saturday in date_cols:
+                        # 3. 以「天」為單位排班，同一天內跨班次共用醫師-助理記憶
+                        for doc_col, asst_col, day_num, is_saturday in date_cols:
+
+                            # doc_day_memory[醫師名] = 助理名
+                            # 記錄這天已為某醫師分配的助理，後續班次優先沿用
+                            doc_day_memory = {}
+
+                            for shift_name, doc_rows, counter_rows in shifts:
 
                                 # 收集本班、本天的醫師清單
                                 docs_this_shift = []
@@ -325,35 +330,49 @@ with tab3:
 
                                 working_now = set()
 
-                                # A. 固定跟診綁定（已在班表填好的助理，直接納入 working_now）
+                                # A. 先把班表已填的助理、以及今天已記憶的配對都納入 working_now
                                 for r, doc in docs_this_shift:
                                     existing_asst = ws.cell(r, asst_col).value
                                     if existing_asst and str(existing_asst).strip() in ASSISTANTS:
                                         working_now.add(str(existing_asst).strip())
+                                    elif doc in doc_day_memory:
+                                        # 沿用今天早班/午班已分配的助理
+                                        working_now.add(doc_day_memory[doc])
 
-                                # B. 對尚未填助理的醫師行，依規則填入
+                                # B. 對尚未填助理的醫師行依規則填入
                                 for r, doc in docs_this_shift:
                                     existing_asst = ws.cell(r, asst_col).value
                                     already_filled = existing_asst and str(existing_asst).strip() in ASSISTANTS
-
                                     if already_filled:
-                                        continue  # 班表已寫好，不覆蓋
+                                        # 更新記憶，確保後續班次知道這位醫師配誰
+                                        doc_day_memory[doc] = str(existing_asst).strip()
+                                        continue
 
                                     assigned = None
 
+                                    # 優先：今天已分配過的助理（跨班次延續）
+                                    if doc in doc_day_memory:
+                                        candidate = doc_day_memory[doc]
+                                        # 晚班檢查：若該助理不能排晚班則放棄沿用
+                                        night_ok = not ("晚" in shift_name and candidate in NO_NIGHT_SHIFT)
+                                        if (night_ok
+                                                and candidate not in working_now
+                                                and not is_on_leave(candidate, day_num, shift_name)):
+                                            assigned = candidate
+
                                     # 星期六特殊綁定
-                                    if is_saturday and doc in SATURDAY_SPECIAL_MATCH:
+                                    if not assigned and is_saturday and doc in SATURDAY_SPECIAL_MATCH:
                                         candidate = SATURDAY_SPECIAL_MATCH[doc]
                                         if candidate not in working_now and not is_on_leave(candidate, day_num, shift_name):
                                             assigned = candidate
 
                                     # 平日固定綁定
-                                    if not assigned and doc in DOCTOR_ASSISTANT_MATCH:
+                                    if not assigned and not is_saturday and doc in DOCTOR_ASSISTANT_MATCH:
                                         candidate = DOCTOR_ASSISTANT_MATCH[doc]
                                         if candidate not in working_now and not is_on_leave(candidate, day_num, shift_name):
                                             assigned = candidate
 
-                                    # 輪流分配（依累計次數由少到多排序，確保平均輪班）
+                                    # 輪流分配（依累計次數由少到多，確保平均輪班）
                                     if not assigned:
                                         pool = [
                                             a for a in ASSISTANTS
@@ -364,7 +383,6 @@ with tab3:
                                         ]
                                         if "晚" in shift_name:
                                             pool = [a for a in pool if a not in NO_NIGHT_SHIFT]
-                                        # 按累計次數排序，次數少的優先
                                         pool.sort(key=lambda a: rotation_counter[a])
                                         if pool:
                                             assigned = pool[0]
@@ -372,6 +390,7 @@ with tab3:
                                     if assigned:
                                         write_cell(r, asst_col, assigned)
                                         working_now.add(assigned)
+                                        doc_day_memory[doc] = assigned  # 記憶這天此醫師的助理
                                         rotation_counter[assigned] += 1
                                     else:
                                         write_cell(r, asst_col, "缺")
@@ -406,15 +425,12 @@ with tab3:
                                         break
 
                                 # 寫入櫃檯列
-                                # counter_rows = [櫃2列, 櫃1列]
-                                # 診次 < 4：只寫櫃1（索引1），櫃2 留空
-                                # 診次 >= 4：先寫櫃2（索引0），再寫櫃1（索引1）
+                                # 診次 < 4：只寫櫃1；診次 >= 4：寫櫃2 + 櫃1
                                 if need_two_counters:
                                     for i, cr in enumerate(counter_rows):
                                         if i < len(assigned_counters) and cr:
                                             write_cell(cr, asst_col, assigned_counters[i])
                                 else:
-                                    # 只填櫃1（counter_rows 的最後一個）
                                     if counter_rows and assigned_counters:
                                         write_cell(counter_rows[-1], asst_col, assigned_counters[0])
 
