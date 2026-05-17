@@ -70,7 +70,8 @@ if "timeoff_db" not in st.session_state:
 if "shift_stats" not in st.session_state:
     st.session_state.shift_stats = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統")
+st.title("🏥 恩霖診所 - 自動排班系統 V14 (防過勞與預排保護版)")
+st.info("🛡️ 已啟用「每日最高兩診」防過勞鎖，並支援掃描「人工預排」的格子自動保護！")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -99,9 +100,9 @@ with tab1:
                 sat_days = {d.day for d in found_dates if d.weekday() == 5}
                 st.session_state.saturday_dates = sat_days
                 st.success(
-                    f"✅ 檔案讀取完成！"
-                    f"　偵測月份：**{ref.year} 年 {ref.month} 月**"
-                    f"　　星期六日期：{sorted(sat_days)}"
+                    f"✅ 檔案讀取完成！\n"
+                    f"　偵測月份：**{ref.year} 年 {ref.month} 月**\n"
+                    f"　星期六日期：{sorted(sat_days)}"
                 )
             else:
                 st.warning("⚠️ 班表中找不到日期資料，請確認 Excel 格式是否正確。")
@@ -123,8 +124,8 @@ with tab2:
     days_in_month  = calendar.monthrange(year, month)[1]
 
     st.info(
-        f"📅 目前班表月份：{year} 年 {month} 月（共 {days_in_month} 天）"
-        f"　　星期六：{sorted(SATURDAY_DATES)}"
+        f"📅 目前班表月份：{year} 年 {month} 月（共 {days_in_month} 天）\n"
+        f"　星期六：{sorted(SATURDAY_DATES)}"
     )
 
     selected_ast = st.selectbox("選擇助理：", ASSISTANTS)
@@ -153,8 +154,7 @@ with tab2:
 
     column_config = {
         "日期":   st.column_config.TextColumn("日期", width="small", disabled=True),
-        "休整天": st.column_config.CheckboxColumn("✅ 休整天", width="small",
-                    help="打勾後自動勾選早、午、晚休"),
+        "休整天": st.column_config.CheckboxColumn("✅ 休整天", width="small", help="打勾後自動勾選早、午、晚休"),
         "早休":   st.column_config.CheckboxColumn("早休", width="small"),
         "午休":   st.column_config.CheckboxColumn("午休", width="small"),
         "晚休":   st.column_config.CheckboxColumn("晚休", width="small"),
@@ -164,7 +164,7 @@ with tab2:
     if selected_ast in NO_NIGHT_SHIFT:
         disabled_cols.append("晚休")
 
-    st.info("📌 星期六無晚班，即使勾選晚休也不會計入排班。")
+    st.caption("📌 星期六無晚班，即使勾選晚休也不會計入排班。")
 
     edited_df = st.data_editor(
         saved_df,
@@ -229,7 +229,6 @@ with tab2:
 # ==========================================
 with tab3:
 
-    # 若已有排班結果，頁面上方持續顯示診次統計
     if st.session_state.shift_stats:
         st.subheader("📊 上次排班診次統計")
         stats = st.session_state.shift_stats
@@ -257,26 +256,19 @@ with tab3:
                     wb = openpyxl.load_workbook(uploaded_file)
                     ws = wb.active
 
-                    # rotation_counter 同時作為診次計數與輪班依據
                     rotation_counter = {a: 0 for a in ASSISTANTS}
 
                     # ── 輔助函式 ──────────────────────────────────────
-
                     def is_on_leave(ast_name, day_num, shift_type):
-                        """查詢助理當天該班是否請假"""
-                        if ast_name not in st.session_state.timeoff_db:
-                            return False
-                        if not (1 <= day_num <= 31):
-                            return False
+                        if ast_name not in st.session_state.timeoff_db: return False
+                        if not (1 <= day_num <= 31): return False
                         db  = st.session_state.timeoff_db[ast_name]
                         col = "早休" if "早" in shift_type else ("午休" if "午" in shift_type else "晚休")
                         try:
                             return bool(db[col].iloc[day_num - 1])
-                        except Exception:
-                            return False
+                        except Exception: return False
 
                     def over_limit(ast_name):
-                        """是否已達 42 診上限"""
                         return rotation_counter[ast_name] >= MAX_SHIFTS
 
                     def write_cell(row, col, value):
@@ -285,30 +277,28 @@ with tab3:
                         cell.font  = CELL_FONT
 
                     def find_doctors_in_cell(cell_value):
-                        if not cell_value:
-                            return []
+                        if not cell_value: return []
                         text = str(cell_value).replace(" ", "")
-                        if "休" in text:
-                            return []
+                        if "休" in text: return []
                         return [doc for doc in VALID_DOCTORS if doc in text]
 
-                    def ok_for_assist(candidate, working_now, day_num, shift_name):
-                        """跟診助理候選人通用檢查"""
+                    def ok_for_assist(candidate, working_now, day_num, shift_name, daily_counts):
                         return (
                             candidate not in working_now
                             and not is_on_leave(candidate, day_num, shift_name)
                             and not over_limit(candidate)
+                            and daily_counts.get(candidate, 0) < 2  # 🌟 防過勞：每天最多2診
                             and candidate not in ONLY_COUNTER
                             and candidate not in NO_COUNTER
                             and not ("晚" in shift_name and candidate in NO_NIGHT_SHIFT)
                         )
 
-                    def ok_for_counter(candidate, working_now, day_num, shift_name):
-                        """櫃檯助理候選人通用檢查"""
+                    def ok_for_counter(candidate, working_now, day_num, shift_name, daily_counts):
                         return (
                             candidate not in working_now
                             and not is_on_leave(candidate, day_num, shift_name)
                             and not over_limit(candidate)
+                            and daily_counts.get(candidate, 0) < 2  # 🌟 防過勞：每天最多2診
                             and not ("晚" in shift_name and candidate in NO_NIGHT_SHIFT)
                         )
 
@@ -320,26 +310,21 @@ with tab3:
                             enlin_rows.append(r)
 
                     if not enlin_rows:
-                        st.error("找不到班表週塊（含「恩霖」的列），請確認上傳的檔案格式正確。")
+                        st.error("找不到班表週塊，請確認上傳的檔案格式正確。")
                         st.stop()
 
                     # ── 處理每個週塊 ──────────────────────────────────
                     for week_idx, week_start in enumerate(enlin_rows):
-                        week_end = (enlin_rows[week_idx + 1]
-                                    if week_idx + 1 < len(enlin_rows)
-                                    else ws.max_row + 1)
+                        week_end = (enlin_rows[week_idx + 1] if week_idx + 1 < len(enlin_rows) else ws.max_row + 1)
 
-                        # 1. 讀取日期列
                         date_cols = []
                         for c in range(2, ws.max_column + 1, 2):
                             v = ws.cell(week_start, c).value
                             if isinstance(v, datetime.datetime):
                                 date_cols.append((c, c + 1, v.day, v.weekday() == 5))
 
-                        if not date_cols:
-                            continue
+                        if not date_cols: continue
 
-                        # 2. 找出班別區段列號
                         row_labels = {}
                         for r in range(week_start, week_end):
                             v1 = str(ws.cell(r, 1).value or "").replace(" ", "")
@@ -356,135 +341,140 @@ with tab3:
 
                         shifts = []
                         if "早班" in row_labels and "早櫃2" in row_labels:
-                            doc_rows = [r for r in range(row_labels["早班"] + 1, row_labels["早櫃2"])
-                                        if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
+                            doc_rows = [r for r in range(row_labels["早班"] + 1, row_labels["早櫃2"]) if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
                             counter_rows = [x for x in [row_labels.get("早櫃2"), row_labels.get("早櫃1")] if x]
                             shifts.append(("早班", doc_rows, counter_rows))
 
                         if "早櫃1" in row_labels and "午櫃2" in row_labels:
-                            doc_rows = [r for r in range(row_labels["早櫃1"] + 1, row_labels["午櫃2"])
-                                        if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
+                            doc_rows = [r for r in range(row_labels["早櫃1"] + 1, row_labels["午櫃2"]) if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
                             counter_rows = [x for x in [row_labels.get("午櫃2"), row_labels.get("午櫃1")] if x]
                             shifts.append(("午班", doc_rows, counter_rows))
 
                         if "晚班" in row_labels and "晚櫃2" in row_labels:
-                            doc_rows = [r for r in range(row_labels["晚班"] + 1, row_labels["晚櫃2"])
-                                        if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
+                            doc_rows = [r for r in range(row_labels["晚班"] + 1, row_labels["晚櫃2"]) if str(ws.cell(r, 1).value or "").strip() in ("11", "21", "22", "23", "24")]
                             counter_rows = [x for x in [row_labels.get("晚櫃2"), row_labels.get("晚櫃1")] if x]
                             shifts.append(("晚班", doc_rows, counter_rows))
 
                         # 3. 以「天」為單位排班
                         for doc_col, asst_col, day_num, is_saturday in date_cols:
-                            doc_day_memory = {}  # 記錄這天已為某醫師分配的助理（跨班次延續）
+                            doc_day_memory = {}
+                            # 🌟 新增防過勞：每天清晨，把所有人的診次計步器歸零！
+                            daily_shift_counts = {a: 0 for a in ASSISTANTS}
 
                             for shift_name, doc_rows, counter_rows in shifts:
-
-                                # 收集本班醫師清單
                                 docs_this_shift = []
                                 for r in doc_rows:
                                     for doc in find_doctors_in_cell(ws.cell(r, doc_col).value):
                                         docs_this_shift.append((r, doc))
 
-                                if not docs_this_shift:
-                                    continue
+                                if not docs_this_shift: continue
 
                                 working_now = set()
 
-                                # A. 先把已填的助理納入 working_now
-                                for r, doc in docs_this_shift:
+                                # 🌟 A. 預排保護機制 (掃描本班次已填寫的助理)
+                                for r in doc_rows + counter_rows:
                                     ea = ws.cell(r, asst_col).value
                                     if ea and str(ea).strip() in ASSISTANTS:
-                                        working_now.add(str(ea).strip())
-                                    elif doc in doc_day_memory:
-                                        working_now.add(doc_day_memory[doc])
+                                        ast = str(ea).strip()
+                                        working_now.add(ast)
+                                        daily_shift_counts[ast] += 1
+                                        rotation_counter[ast] += 1
+                                        
+                                        # 記錄到記憶體中，讓該醫師下個班次也能優先排這位助理
+                                        if r in doc_rows:
+                                            docs_here = find_doctors_in_cell(ws.cell(r, doc_col).value)
+                                            for doc in docs_here:
+                                                doc_day_memory[doc] = ast
 
                                 # B. 跟診助理分配
                                 for r, doc in docs_this_shift:
                                     ea = ws.cell(r, asst_col).value
-                                    if ea and str(ea).strip() in ASSISTANTS:
-                                        doc_day_memory[doc] = str(ea).strip()
-                                        continue
+                                    if ea: 
+                                        continue # 🌟 已經有人工手動排班了，跳過不覆蓋！
 
                                     assigned = None
 
-                                    # 優先 1：今天已分配過（跨班次延續）
                                     if doc in doc_day_memory:
                                         cand = doc_day_memory[doc]
-                                        if ok_for_assist(cand, working_now, day_num, shift_name):
+                                        if ok_for_assist(cand, working_now, day_num, shift_name, daily_shift_counts):
                                             assigned = cand
-
-                                    # 優先 2：星期六特殊綁定
                                     if not assigned and is_saturday and doc in SATURDAY_SPECIAL_MATCH:
                                         cand = SATURDAY_SPECIAL_MATCH[doc]
-                                        if ok_for_assist(cand, working_now, day_num, shift_name):
+                                        if ok_for_assist(cand, working_now, day_num, shift_name, daily_shift_counts):
                                             assigned = cand
-
-                                    # 優先 3：平日固定綁定
                                     if not assigned and not is_saturday and doc in DOCTOR_ASSISTANT_MATCH:
                                         cand = DOCTOR_ASSISTANT_MATCH[doc]
-                                        if ok_for_assist(cand, working_now, day_num, shift_name):
+                                        if ok_for_assist(cand, working_now, day_num, shift_name, daily_shift_counts):
                                             assigned = cand
-
-                                    # 優先 4：輪流（診次由少到多，已達上限者自動跳過）
                                     if not assigned:
                                         pool = sorted(
-                                            [a for a in ASSISTANTS if ok_for_assist(a, working_now, day_num, shift_name)],
+                                            [a for a in ASSISTANTS if ok_for_assist(a, working_now, day_num, shift_name, daily_shift_counts)],
                                             key=lambda a: rotation_counter[a]
                                         )
-                                        if pool:
-                                            assigned = pool[0]
+                                        if pool: assigned = pool[0]
 
                                     if assigned:
                                         write_cell(r, asst_col, assigned)
                                         working_now.add(assigned)
                                         doc_day_memory[doc] = assigned
                                         rotation_counter[assigned] += 1
+                                        daily_shift_counts[assigned] += 1
                                     else:
-                                        # 無人可排（全達上限或全請假）→ 標缺
                                         write_cell(r, asst_col, "缺")
 
                                 # C. 櫃檯分配
                                 need_two = len(docs_this_shift) >= 4
-                                assigned_counters = []
+                                target_count = 2 if need_two else 1
+                                
+                                # 計算已經被手動預排的櫃檯人數
+                                pre_assigned_counters = sum(
+                                    1 for cr in counter_rows 
+                                    if ws.cell(cr, asst_col).value and str(ws.cell(cr, asst_col).value).strip() in ASSISTANTS
+                                )
+                                
+                                counters_to_add = target_count - pre_assigned_counters
+                                assigned_new_counters = []
 
-                                for cand in COUNTER_PRIORITY:
-                                    if len(assigned_counters) >= (2 if need_two else 1):
-                                        break
-                                    if ok_for_counter(cand, working_now, day_num, shift_name):
-                                        assigned_counters.append(cand)
-                                        working_now.add(cand)
-                                        rotation_counter[cand] += 1
+                                if counters_to_add > 0:
+                                    for cand in COUNTER_PRIORITY:
+                                        if len(assigned_new_counters) >= counters_to_add: break
+                                        if ok_for_counter(cand, working_now, day_num, shift_name, daily_shift_counts):
+                                            assigned_new_counters.append(cand)
+                                            working_now.add(cand)
+                                            rotation_counter[cand] += 1
+                                            daily_shift_counts[cand] += 1
 
-                                # 補足缺口
-                                while len(assigned_counters) < (2 if need_two else 1):
-                                    pool = sorted(
-                                        [a for a in ASSISTANTS
-                                         if ok_for_counter(a, working_now, day_num, shift_name)
-                                         and a not in NO_COUNTER],
-                                        key=lambda a: rotation_counter[a]
-                                    )
-                                    if pool:
-                                        assigned_counters.append(pool[0])
-                                        working_now.add(pool[0])
-                                        rotation_counter[pool[0]] += 1
-                                    else:
-                                        assigned_counters.append("缺")
-                                        break
+                                    while len(assigned_new_counters) < counters_to_add:
+                                        pool = sorted(
+                                            [a for a in ASSISTANTS if ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts) and a not in NO_COUNTER],
+                                            key=lambda a: rotation_counter[a]
+                                        )
+                                        if pool:
+                                            assigned_new_counters.append(pool[0])
+                                            working_now.add(pool[0])
+                                            rotation_counter[pool[0]] += 1
+                                            daily_shift_counts[pool[0]] += 1
+                                        else:
+                                            assigned_new_counters.append("缺")
+                                            break
 
-                                # 寫入櫃檯列
-                                if need_two:
-                                    for i, cr in enumerate(counter_rows):
-                                        val = assigned_counters[i] if i < len(assigned_counters) else "缺"
-                                        write_cell(cr, asst_col, val)
-                                else:
-                                    val = assigned_counters[0] if assigned_counters else "缺"
-                                    if counter_rows:
-                                        write_cell(counter_rows[-1], asst_col, val)
+                                # 寫入未被手動預排的櫃檯格子
+                                c_idx = 0
+                                filled_count = pre_assigned_counters
+                                for cr in counter_rows:
+                                    ea = ws.cell(cr, asst_col).value
+                                    if not ea or str(ea).strip() not in ASSISTANTS:
+                                        if c_idx < len(assigned_new_counters):
+                                            write_cell(cr, asst_col, assigned_new_counters[c_idx])
+                                            c_idx += 1
+                                            filled_count += 1
+                                        elif filled_count < target_count:
+                                            write_cell(cr, asst_col, "缺")
+                                            filled_count += 1
 
-                    # ── 儲存診次統計 ──────────────────────────────────
+                    # ── 儲存與顯示診次統計 ──────────────────────────────────
                     st.session_state.shift_stats = dict(rotation_counter)
 
-                    # ── 顯示診次統計 ──────────────────────────────────
                     st.subheader("📊 本次排班診次統計")
                     st.caption(f"每位助理上限：{MAX_SHIFTS} 診／月　｜　已達上限者自動標「缺」")
 
@@ -492,16 +482,13 @@ with tab3:
                     for idx, ast in enumerate(ASSISTANTS):
                         count = rotation_counter.get(ast, 0)
                         over  = count > MAX_SHIFTS
-                        pct   = min(int(count / MAX_SHIFTS * 100), 100)
                         cols[idx].metric(
                             label=ast,
                             value=f"{count} 診",
-                            delta=(f"⚠️ 超額 {count - MAX_SHIFTS} 診" if over
-                                   else f"剩餘 {MAX_SHIFTS - count} 診"),
+                            delta=(f"⚠️ 超額 {count - MAX_SHIFTS} 診" if over else f"剩餘 {MAX_SHIFTS - count} 診"),
                             delta_color="inverse" if over else "normal",
                         )
 
-                    # 進度條視覺化
                     st.subheader("📈 診次進度")
                     bar_cols = st.columns(len(ASSISTANTS))
                     for idx, ast in enumerate(ASSISTANTS):
@@ -518,7 +505,7 @@ with tab3:
                     s_month = st.session_state.schedule_month
                     output  = io.BytesIO()
                     wb.save(output)
-                    st.success("✅ 排班完成！請點下方按鈕下載結果。")
+                    st.success("✅ 排班完成！已成功套用防過勞機制並保護您的手排內容。")
                     st.download_button(
                         "📥 下載排班結果",
                         output.getvalue(),
