@@ -5,7 +5,7 @@ import calendar
 import openpyxl
 from openpyxl.styles import Font
 import datetime
-import json  # 🌟 新增：用來處理休假備份檔的工具
+import json
 
 # 統一字型設定（與原班表一致）
 CELL_FONT = Font(name="微軟正黑體", size=10)
@@ -31,7 +31,10 @@ COUNTER_PRIORITY = ["欣寧", "維珍", "和芸", "映璇", "姿穎"]
 
 ONLY_COUNTER   = ["欣寧"]                
 NO_COUNTER     = ["萃屏", "菀庭", "濘安"]   
-NO_NIGHT_SHIFT = ["維珍"]                
+NO_NIGHT_SHIFT = ["維珍"]  
+
+# 🌟 新增：專屬時段封印名單
+SATURDAY_ONLY  = ["濘安"]              
 MAX_SHIFTS = 42  
 
 st.set_page_config(page_title="恩霖診所 - 自動排班系統", layout="wide")
@@ -48,8 +51,8 @@ if not st.session_state.authenticated:
 if "timeoff_db" not in st.session_state: st.session_state.timeoff_db = {}
 if "shift_stats" not in st.session_state: st.session_state.shift_stats = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V18")
-st.info("🛡️ 已新增「休假紀錄備份與還原」功能，更新系統不再怕資料遺失！")
+st.title("🏥 恩霖診所 - 自動排班系統 V19")
+st.info("🛡️ 已修復「濘安誤入平日」的 Bug，加上絕對封印，確保她只在週六出現！")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -111,30 +114,22 @@ with tab2:
         st.success(f"✅ {selected_ast} 休假已儲存！")
 
     st.divider()
-    
-    # 🌟 核心新增：休假備份與還原機制 🌟
     st.subheader("💾 休假紀錄備份與還原")
     st.caption("當系統準備更新或重啟前，請先點擊左側「匯出備份」。更新完畢後，在右側「上傳」該備份檔即可還原所有助理的休假！")
     
     col_export, col_import = st.columns(2)
-    
     with col_export:
         if st.session_state.timeoff_db:
-            export_data = {}
-            for ast, ast_df in st.session_state.timeoff_db.items():
-                export_data[ast] = ast_df.to_dict(orient="records")
-            json_str = json.dumps(export_data, ensure_ascii=False)
-            
+            export_data = {ast: ast_df.to_dict(orient="records") for ast, ast_df in st.session_state.timeoff_db.items()}
             st.download_button(
                 label="📥 1. 匯出全部助理休假備份檔",
-                data=json_str,
+                data=json.dumps(export_data, ensure_ascii=False),
                 file_name=f"恩霖診所_休假備份_{year}年{month}月.json",
                 mime="application/json",
                 use_container_width=True
             )
         else:
             st.button("📥 1. 匯出全部助理休假備份檔", disabled=True, use_container_width=True)
-            st.caption("目前尚無資料可匯出")
 
     with col_import:
         uploaded_backup = st.file_uploader("📤 2. 選擇備份檔還原", type=["json"], label_visibility="collapsed")
@@ -145,9 +140,8 @@ with tab2:
                     for ast, records in backup_data.items():
                         st.session_state.timeoff_db[ast] = pd.DataFrame(records)
                     st.success("✅ 休假紀錄已成功還原！")
-                    st.rerun()  # 畫面重整讓資料顯示出來
-                except Exception as e:
-                    st.error(f"還原失敗，請確認上傳的是正確的 json 備份檔：{e}")
+                    st.rerun()
+                except Exception as e: st.error(f"還原失敗：{e}")
 
 with tab3:
     if st.session_state.shift_stats:
@@ -175,13 +169,9 @@ with tab3:
                     def over_limit(ast_name): return rotation_counter[ast_name] >= MAX_SHIFTS
                     def write_cell(r, c, v): ws.cell(r, c).value = v; ws.cell(r, c).font = CELL_FONT
                     def get_docs(v): return [d for d in VALID_DOCTORS if d in str(v).replace(" ", "")] if v and "休" not in str(v) else []
-
                     def prevents_split_shift(cand, shift_name, worked_shifts):
-                        if shift_name == "晚班":
-                            if "早班" in worked_shifts[cand] and "午班" not in worked_shifts[cand]:
-                                return False
+                        if shift_name == "晚班" and "早班" in worked_shifts[cand] and "午班" not in worked_shifts[cand]: return False
                         return True
-
                     def is_continuous(cand, shift_name, worked_shifts):
                         if shift_name == "午班" and "早班" in worked_shifts[cand]: return True
                         if shift_name == "晚班" and "午班" in worked_shifts[cand]: return True
@@ -237,10 +227,13 @@ with tab3:
                                 for r, doc in docs_this_shift:
                                     if ws.cell(r, asst_col).value: continue 
                                     assigned = next((c for c in [doc_day_memory.get(doc), SATURDAY_SPECIAL_MATCH.get(doc) if is_saturday else None, DOCTOR_ASSISTANT_MATCH.get(doc) if not is_saturday else None] if c and ok_for_assist(c, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)), None)
+                                    
                                     if not assigned:
-                                        pool = sorted([a for a in ASSISTANTS if ok_for_assist(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)], 
+                                        # 🌟 絕對封印發動：找人救火時，直接排除 SATURDAY_ONLY 名單 (濘安)
+                                        pool = sorted([a for a in ASSISTANTS if a not in SATURDAY_ONLY and ok_for_assist(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)], 
                                                       key=lambda a: (0 if is_continuous(a, shift_name, daily_worked_shifts) else 1, rotation_counter[a]))
                                         if pool: assigned = pool[0]
+                                    
                                     if assigned:
                                         write_cell(r, asst_col, assigned); working_now.add(assigned); doc_day_memory[doc] = assigned
                                         rotation_counter[assigned] += 1; daily_shift_counts[assigned] += 1; daily_worked_shifts[assigned].add(shift_name)
@@ -252,7 +245,8 @@ with tab3:
                                 assigned_new = []
 
                                 if to_add > 0:
-                                    avail_counters = [c for c in COUNTER_PRIORITY if ok_for_counter(c, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)]
+                                    # 🌟 絕對封印發動：排櫃台時，直接排除 SATURDAY_ONLY 名單 (濘安)
+                                    avail_counters = [c for c in COUNTER_PRIORITY if c not in SATURDAY_ONLY and ok_for_counter(c, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)]
                                     avail_counters.sort(key=lambda a: (0 if is_continuous(a, shift_name, daily_worked_shifts) else 1, rotation_counter.get(a, 0)))
                                     
                                     for cand in avail_counters:
@@ -261,7 +255,8 @@ with tab3:
                                         rotation_counter[cand] += 1; daily_shift_counts[cand] += 1; daily_worked_shifts[cand].add(shift_name)
                                     
                                     while len(assigned_new) < to_add:
-                                        pool = sorted([a for a in ASSISTANTS if ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)], 
+                                        # 🌟 絕對封印發動：櫃台後備池，同樣排除 SATURDAY_ONLY 名單 (濘安)
+                                        pool = sorted([a for a in ASSISTANTS if a not in SATURDAY_ONLY and ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts) and a not in NO_COUNTER], 
                                                       key=lambda a: (0 if is_continuous(a, shift_name, daily_worked_shifts) else 1, rotation_counter[a]))
                                         if pool:
                                             assigned_new.append(pool[0]); working_now.add(pool[0])
@@ -277,6 +272,6 @@ with tab3:
                     st.session_state.shift_stats = dict(rotation_counter)
                     s_year, s_month = st.session_state.schedule_year, st.session_state.schedule_month
                     output = io.BytesIO(); wb.save(output)
-                    st.success("✅ 排班完成！")
-                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果_V18.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.success("✅ 排班完成！濘安的平日封印已生效。")
+                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果_V19.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e: st.error(f"排班發生錯誤：{e}"); import traceback; st.code(traceback.format_exc())
