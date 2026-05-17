@@ -36,7 +36,7 @@ SATURDAY_SPECIAL_MATCH = {
 # 助理名單
 ASSISTANTS = ["映璇", "和芸", "欣寧", "萃屏", "維珍", "菀庭", "姿穎", "濘安"]
 
-# 櫃檯優先順序
+# 櫃檯優先順序名單 (只做資格篩選，排班將依診次動態平均分配)
 COUNTER_PRIORITY = ["欣寧", "維珍", "和芸", "映璇", "姿穎"]
 
 ONLY_COUNTER   = ["欣寧"]                # 只做櫃檯
@@ -70,8 +70,8 @@ if "timeoff_db" not in st.session_state:
 if "shift_stats" not in st.session_state:
     st.session_state.shift_stats = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V14 (防過勞與預排保護版)")
-st.info("🛡️ 已啟用「每日最高兩診」防過勞鎖，並支援掃描「人工預排」的格子自動保護！")
+st.title("🏥 恩霖診所 - 自動排班系統 V15 (櫃台平均分配版)")
+st.info("🛡️ 已升級「動態櫃台分配」：AI 會優先將櫃台排給目前總診次最少的人，確保櫃台班平均交錯！")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -287,7 +287,7 @@ with tab3:
                             candidate not in working_now
                             and not is_on_leave(candidate, day_num, shift_name)
                             and not over_limit(candidate)
-                            and daily_counts.get(candidate, 0) < 2  # 🌟 防過勞：每天最多2診
+                            and daily_counts.get(candidate, 0) < 2
                             and candidate not in ONLY_COUNTER
                             and candidate not in NO_COUNTER
                             and not ("晚" in shift_name and candidate in NO_NIGHT_SHIFT)
@@ -298,7 +298,7 @@ with tab3:
                             candidate not in working_now
                             and not is_on_leave(candidate, day_num, shift_name)
                             and not over_limit(candidate)
-                            and daily_counts.get(candidate, 0) < 2  # 🌟 防過勞：每天最多2診
+                            and daily_counts.get(candidate, 0) < 2
                             and not ("晚" in shift_name and candidate in NO_NIGHT_SHIFT)
                         )
 
@@ -358,7 +358,6 @@ with tab3:
                         # 3. 以「天」為單位排班
                         for doc_col, asst_col, day_num, is_saturday in date_cols:
                             doc_day_memory = {}
-                            # 🌟 新增防過勞：每天清晨，把所有人的診次計步器歸零！
                             daily_shift_counts = {a: 0 for a in ASSISTANTS}
 
                             for shift_name, doc_rows, counter_rows in shifts:
@@ -371,7 +370,7 @@ with tab3:
 
                                 working_now = set()
 
-                                # 🌟 A. 預排保護機制 (掃描本班次已填寫的助理)
+                                # A. 預排保護機制 (掃描本班次已填寫的助理)
                                 for r in doc_rows + counter_rows:
                                     ea = ws.cell(r, asst_col).value
                                     if ea and str(ea).strip() in ASSISTANTS:
@@ -380,7 +379,6 @@ with tab3:
                                         daily_shift_counts[ast] += 1
                                         rotation_counter[ast] += 1
                                         
-                                        # 記錄到記憶體中，讓該醫師下個班次也能優先排這位助理
                                         if r in doc_rows:
                                             docs_here = find_doctors_in_cell(ws.cell(r, doc_col).value)
                                             for doc in docs_here:
@@ -389,8 +387,7 @@ with tab3:
                                 # B. 跟診助理分配
                                 for r, doc in docs_this_shift:
                                     ea = ws.cell(r, asst_col).value
-                                    if ea: 
-                                        continue # 🌟 已經有人工手動排班了，跳過不覆蓋！
+                                    if ea: continue 
 
                                     assigned = None
 
@@ -422,11 +419,10 @@ with tab3:
                                     else:
                                         write_cell(r, asst_col, "缺")
 
-                                # C. 櫃檯分配
+                                # 🌟 C. 櫃檯分配 (核心優化：動態平均分配) 🌟
                                 need_two = len(docs_this_shift) >= 4
                                 target_count = 2 if need_two else 1
                                 
-                                # 計算已經被手動預排的櫃檯人數
                                 pre_assigned_counters = sum(
                                     1 for cr in counter_rows 
                                     if ws.cell(cr, asst_col).value and str(ws.cell(cr, asst_col).value).strip() in ASSISTANTS
@@ -436,14 +432,22 @@ with tab3:
                                 assigned_new_counters = []
 
                                 if counters_to_add > 0:
-                                    for cand in COUNTER_PRIORITY:
-                                        if len(assigned_new_counters) >= counters_to_add: break
-                                        if ok_for_counter(cand, working_now, day_num, shift_name, daily_shift_counts):
-                                            assigned_new_counters.append(cand)
-                                            working_now.add(cand)
-                                            rotation_counter[cand] += 1
-                                            daily_shift_counts[cand] += 1
+                                    # 1. 抓出可以站櫃檯的優先名單，並「依照目前總診次由少到多」動態排序
+                                    available_counters = [
+                                        cand for cand in COUNTER_PRIORITY
+                                        if ok_for_counter(cand, working_now, day_num, shift_name, daily_shift_counts)
+                                    ]
+                                    available_counters.sort(key=lambda a: rotation_counter.get(a, 0))
 
+                                    # 2. 優先給目前時數最少的人
+                                    for cand in available_counters:
+                                        if len(assigned_new_counters) >= counters_to_add: break
+                                        assigned_new_counters.append(cand)
+                                        working_now.add(cand)
+                                        rotation_counter[cand] += 1
+                                        daily_shift_counts[cand] += 1
+
+                                    # 3. 如果優先名單用完了還是缺人，從一般池子裡找
                                     while len(assigned_new_counters) < counters_to_add:
                                         pool = sorted(
                                             [a for a in ASSISTANTS if ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts) and a not in NO_COUNTER],
@@ -505,7 +509,7 @@ with tab3:
                     s_month = st.session_state.schedule_month
                     output  = io.BytesIO()
                     wb.save(output)
-                    st.success("✅ 排班完成！已成功套用防過勞機制並保護您的手排內容。")
+                    st.success("✅ 排班完成！櫃台班次已成功平均分配。")
                     st.download_button(
                         "📥 下載排班結果",
                         output.getvalue(),
