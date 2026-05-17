@@ -5,6 +5,7 @@ import calendar
 import openpyxl
 from openpyxl.styles import Font
 import datetime
+import json  # 🌟 新增：用來處理休假備份檔的工具
 
 # 統一字型設定（與原班表一致）
 CELL_FONT = Font(name="微軟正黑體", size=10)
@@ -47,8 +48,8 @@ if not st.session_state.authenticated:
 if "timeoff_db" not in st.session_state: st.session_state.timeoff_db = {}
 if "shift_stats" not in st.session_state: st.session_state.shift_stats = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V17")
-st.info("🛡️ 已修復「菀庭被誤殺」的跟診邏輯 Bug，確保不站櫃台的同仁能正常分配平日跟診！")
+st.title("🏥 恩霖診所 - 自動排班系統 V18")
+st.info("🛡️ 已新增「休假紀錄備份與還原」功能，更新系統不再怕資料遺失！")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -77,6 +78,8 @@ with tab2:
     SATURDAY_DATES = st.session_state.saturday_dates
     year, month = st.session_state.schedule_year, st.session_state.schedule_month
     days_in_month = calendar.monthrange(year, month)[1]
+
+    st.info(f"📅 目前班表月份：{year} 年 {month} 月（共 {days_in_month} 天）")
 
     selected_ast = st.selectbox("選擇助理：", ASSISTANTS)
     if st.session_state.get("last_schedule_month") != (year, month):
@@ -107,6 +110,45 @@ with tab2:
         st.session_state.timeoff_db[selected_ast] = edited_df.copy()
         st.success(f"✅ {selected_ast} 休假已儲存！")
 
+    st.divider()
+    
+    # 🌟 核心新增：休假備份與還原機制 🌟
+    st.subheader("💾 休假紀錄備份與還原")
+    st.caption("當系統準備更新或重啟前，請先點擊左側「匯出備份」。更新完畢後，在右側「上傳」該備份檔即可還原所有助理的休假！")
+    
+    col_export, col_import = st.columns(2)
+    
+    with col_export:
+        if st.session_state.timeoff_db:
+            export_data = {}
+            for ast, ast_df in st.session_state.timeoff_db.items():
+                export_data[ast] = ast_df.to_dict(orient="records")
+            json_str = json.dumps(export_data, ensure_ascii=False)
+            
+            st.download_button(
+                label="📥 1. 匯出全部助理休假備份檔",
+                data=json_str,
+                file_name=f"恩霖診所_休假備份_{year}年{month}月.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        else:
+            st.button("📥 1. 匯出全部助理休假備份檔", disabled=True, use_container_width=True)
+            st.caption("目前尚無資料可匯出")
+
+    with col_import:
+        uploaded_backup = st.file_uploader("📤 2. 選擇備份檔還原", type=["json"], label_visibility="collapsed")
+        if uploaded_backup is not None:
+            if st.button("🔄 執行還原", type="primary", use_container_width=True):
+                try:
+                    backup_data = json.load(uploaded_backup)
+                    for ast, records in backup_data.items():
+                        st.session_state.timeoff_db[ast] = pd.DataFrame(records)
+                    st.success("✅ 休假紀錄已成功還原！")
+                    st.rerun()  # 畫面重整讓資料顯示出來
+                except Exception as e:
+                    st.error(f"還原失敗，請確認上傳的是正確的 json 備份檔：{e}")
+
 with tab3:
     if st.session_state.shift_stats:
         cols = st.columns(len(ASSISTANTS))
@@ -125,7 +167,6 @@ with tab3:
                     ws = wb.active
                     rotation_counter = {a: 0 for a in ASSISTANTS}
 
-                    # ── 輔助函式 ──────────────────────────────────────
                     def is_on_leave(ast_name, day_num, shift_type):
                         if ast_name not in st.session_state.timeoff_db or not (1 <= day_num <= 31): return False
                         try: return bool(st.session_state.timeoff_db[ast_name]["早休" if "早" in shift_type else ("午休" if "午" in shift_type else "晚休")].iloc[day_num - 1])
@@ -146,13 +187,11 @@ with tab3:
                         if shift_name == "晚班" and "午班" in worked_shifts[cand]: return True
                         return False
 
-                    # 🌟 核心修正：移除 NO_COUNTER 的誤殺條件，讓菀庭可以跟診
                     def ok_for_assist(cand, w_now, day_num, s_name, d_counts, w_shifts):
                         return (cand not in w_now and not is_on_leave(cand, day_num, s_name) and not over_limit(cand)
                                 and d_counts.get(cand, 0) < 2 and cand not in ONLY_COUNTER 
                                 and not ("晚" in s_name and cand in NO_NIGHT_SHIFT) and prevents_split_shift(cand, s_name, w_shifts))
 
-                    # 🌟 確保 NO_COUNTER 被精準鎖在櫃台審查裡
                     def ok_for_counter(cand, w_now, day_num, s_name, d_counts, w_shifts):
                         return (cand not in w_now and not is_on_leave(cand, day_num, s_name) and not over_limit(cand)
                                 and cand not in NO_COUNTER
@@ -238,6 +277,6 @@ with tab3:
                     st.session_state.shift_stats = dict(rotation_counter)
                     s_year, s_month = st.session_state.schedule_year, st.session_state.schedule_month
                     output = io.BytesIO(); wb.save(output)
-                    st.success("✅ 排班完成！菀庭已被釋放回跟診支援名單，診次將恢復正常。")
-                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果_V17.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.success("✅ 排班完成！")
+                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果_V18.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e: st.error(f"排班發生錯誤：{e}"); import traceback; st.code(traceback.format_exc())
