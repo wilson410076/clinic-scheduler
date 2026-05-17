@@ -47,8 +47,8 @@ if not st.session_state.authenticated:
 if "timeoff_db" not in st.session_state: st.session_state.timeoff_db = {}
 if "shift_stats" not in st.session_state: st.session_state.shift_stats = {}
 
-st.title("🏥 恩霖診所 - 自動排班系統 V16 (人性化連班版)")
-st.info("🛡️ 已升級「連班優先」與「防斷班(拒絕早晚班)」機制，保障助理班表連續不破碎！")
+st.title("🏥 恩霖診所 - 自動排班系統 V17")
+st.info("🛡️ 已修復「菀庭被誤殺」的跟診邏輯 Bug，確保不站櫃台的同仁能正常分配平日跟診！")
 
 tab1, tab2, tab3 = st.tabs(["📁 1. 上傳班表", "📝 2. 助理劃休", "🚀 3. AI 排班"])
 
@@ -118,7 +118,7 @@ with tab3:
     if st.button("🚀 開始智慧排班", type="primary"):
         if not uploaded_file or "saturday_dates" not in st.session_state: st.error("請先上傳班表！")
         else:
-            with st.spinner("正在執行人性化連班與防斷班排程..."):
+            with st.spinner("正在執行精準修正排程..."):
                 try:
                     uploaded_file.seek(0)
                     wb = openpyxl.load_workbook(uploaded_file)
@@ -135,26 +135,27 @@ with tab3:
                     def write_cell(r, c, v): ws.cell(r, c).value = v; ws.cell(r, c).font = CELL_FONT
                     def get_docs(v): return [d for d in VALID_DOCTORS if d in str(v).replace(" ", "")] if v and "休" not in str(v) else []
 
-                    # 🌟 核心防斷班邏輯 (拒絕早晚兩頭班)
                     def prevents_split_shift(cand, shift_name, worked_shifts):
                         if shift_name == "晚班":
                             if "早班" in worked_shifts[cand] and "午班" not in worked_shifts[cand]:
-                                return False # 上過早班但沒上午班，不准排晚班
+                                return False
                         return True
 
-                    # 🌟 核心連班優先邏輯
                     def is_continuous(cand, shift_name, worked_shifts):
                         if shift_name == "午班" and "早班" in worked_shifts[cand]: return True
                         if shift_name == "晚班" and "午班" in worked_shifts[cand]: return True
                         return False
 
+                    # 🌟 核心修正：移除 NO_COUNTER 的誤殺條件，讓菀庭可以跟診
                     def ok_for_assist(cand, w_now, day_num, s_name, d_counts, w_shifts):
                         return (cand not in w_now and not is_on_leave(cand, day_num, s_name) and not over_limit(cand)
-                                and d_counts.get(cand, 0) < 2 and cand not in ONLY_COUNTER and cand not in NO_COUNTER
+                                and d_counts.get(cand, 0) < 2 and cand not in ONLY_COUNTER 
                                 and not ("晚" in s_name and cand in NO_NIGHT_SHIFT) and prevents_split_shift(cand, s_name, w_shifts))
 
+                    # 🌟 確保 NO_COUNTER 被精準鎖在櫃台審查裡
                     def ok_for_counter(cand, w_now, day_num, s_name, d_counts, w_shifts):
                         return (cand not in w_now and not is_on_leave(cand, day_num, s_name) and not over_limit(cand)
+                                and cand not in NO_COUNTER
                                 and d_counts.get(cand, 0) < 2 and not ("晚" in s_name and cand in NO_NIGHT_SHIFT) 
                                 and prevents_split_shift(cand, s_name, w_shifts))
 
@@ -175,7 +176,7 @@ with tab3:
                         for doc_col, asst_col, day_num, is_saturday in date_cols:
                             doc_day_memory = {}
                             daily_shift_counts = {a: 0 for a in ASSISTANTS}
-                            daily_worked_shifts = {a: set() for a in ASSISTANTS} # 🌟 記錄今天上了哪些班
+                            daily_worked_shifts = {a: set() for a in ASSISTANTS}
 
                             for shift_name, doc_rows, counter_rows in shifts:
                                 docs_this_shift = [(r, doc) for r in doc_rows for doc in get_docs(ws.cell(r, doc_col).value)]
@@ -206,7 +207,6 @@ with tab3:
                                         rotation_counter[assigned] += 1; daily_shift_counts[assigned] += 1; daily_worked_shifts[assigned].add(shift_name)
                                     else: write_cell(r, asst_col, "缺")
 
-                                # 🌟 C. 櫃檯分配 (連班優先 + 平均分配) 🌟
                                 target_count = 2 if len(docs_this_shift) >= 4 else 1
                                 pre_assigned = sum(1 for cr in counter_rows if ws.cell(cr, asst_col).value and str(ws.cell(cr, asst_col).value).strip() in ASSISTANTS)
                                 to_add = target_count - pre_assigned
@@ -214,7 +214,6 @@ with tab3:
 
                                 if to_add > 0:
                                     avail_counters = [c for c in COUNTER_PRIORITY if ok_for_counter(c, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)]
-                                    # 排序：第一順位看是否連班，第二順位看累積時數，確保既連班又平均
                                     avail_counters.sort(key=lambda a: (0 if is_continuous(a, shift_name, daily_worked_shifts) else 1, rotation_counter.get(a, 0)))
                                     
                                     for cand in avail_counters:
@@ -223,7 +222,7 @@ with tab3:
                                         rotation_counter[cand] += 1; daily_shift_counts[cand] += 1; daily_worked_shifts[cand].add(shift_name)
                                     
                                     while len(assigned_new) < to_add:
-                                        pool = sorted([a for a in ASSISTANTS if ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts) and a not in NO_COUNTER], 
+                                        pool = sorted([a for a in ASSISTANTS if ok_for_counter(a, working_now, day_num, shift_name, daily_shift_counts, daily_worked_shifts)], 
                                                       key=lambda a: (0 if is_continuous(a, shift_name, daily_worked_shifts) else 1, rotation_counter[a]))
                                         if pool:
                                             assigned_new.append(pool[0]); working_now.add(pool[0])
@@ -239,6 +238,6 @@ with tab3:
                     st.session_state.shift_stats = dict(rotation_counter)
                     s_year, s_month = st.session_state.schedule_year, st.session_state.schedule_month
                     output = io.BytesIO(); wb.save(output)
-                    st.success("✅ 排班完成！已徹底消滅「斷班」並大幅減少單日換人狀況。")
-                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    st.success("✅ 排班完成！菀庭已被釋放回跟診支援名單，診次將恢復正常。")
+                    st.download_button("📥 下載排班結果", output.getvalue(), f"恩霖診所_{s_year}年{s_month}月排班結果_V17.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e: st.error(f"排班發生錯誤：{e}"); import traceback; st.code(traceback.format_exc())
